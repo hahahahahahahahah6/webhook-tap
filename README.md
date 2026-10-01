@@ -64,6 +64,17 @@ Body:
 Options:
 
 - `--port 8901` — listen port (binds `127.0.0.1` only, never exposed to the network).
+
+### Reaching it from outside
+
+The bind is localhost-only by design — an open request inspector on a public
+interface would leak your webhook payloads. If an external service needs to
+reach the tap, put an SSH tunnel (or any TCP tunnel) in front of it instead
+of changing the bind address:
+
+```bash
+ssh -R 8901:localhost:8901 user@your-server   # then point the webhook at http://your-server:8901/hook
+```
 - `--log-file requests.log` — also append each request as one JSON object per line (JSONL), for later analysis or replay.
 - `--quiet` — suppress console output (requires `--log-file`); run it in the background while your test suite fires.
 

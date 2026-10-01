@@ -83,9 +83,52 @@ class TapHandler(BaseHTTPRequestHandler):
         sys.stdout.write(render_record(rec))
         sys.stdout.flush()
 
-    def _handle(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length) if length > 0 else b""
+    def _read_body(self):
+        """Read the request body, handling chunked transfer encoding."""
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            return self._read_chunked()
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            length = 0
+        return self.rfile.read(length) if length > 0 else b""
+
+    def _read_chunked(self):
+        """Decode a chunked request body. Never raises."""
+        chunks = []
+        total = 0
+        cap = 16 * 1024 * 1024  # sanity cap for a local debugging tool
+        try:
+            while True:
+                line = self.rfile.readline(65536)
+                if not line:
+                    break
+                size_str = line.decode("latin-1").split(";")[0].strip()
+                try:
+                    size = int(size_str, 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    # consume optional trailers and the final empty line
+                    while True:
+                        trailer = self.rfile.readline(65536)
+                        if trailer in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                if total + size > cap:
+                    # don't desync the connection: stop reading further
+                    self.close_connection = True
+                    break
+                chunks.append(self.rfile.read(size))
+                total += size
+                self.rfile.readline(65536)  # chunk-data CRLF
+        except (OSError, ValueError):
+            pass
+        return b"".join(chunks)
+
+    def _handle(self, send_body=True, status=200, extra_headers=None,
+                content_type="application/json"):
+        raw = self._read_body()
         body_text, truncated = format_body(raw)
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -96,11 +139,25 @@ class TapHandler(BaseHTTPRequestHandler):
             "truncated": truncated,
         }
         self.record(rec)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(ACK_BODY)))
+        self.send_response(status)
+        if content_type is not None:
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(ACK_BODY)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(ACK_BODY)
+        if send_body:
+            self.wfile.write(ACK_BODY)
+
+    def do_HEAD(self):
+        # Record the request; HEAD responses carry headers but no body.
+        self._handle(send_body=False)
+
+    def do_OPTIONS(self):
+        # 204 + Allow header, no body.
+        self._handle(send_body=False, status=204, extra_headers={
+            "Allow": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"},
+            content_type=None)
 
     def do_GET(self):
         self._handle()

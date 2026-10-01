@@ -148,6 +148,69 @@ class TestTapServer(unittest.TestCase):
         self.assertIn("\n", text)
         self.assertEqual(json.loads(text), {"a": 1})
 
+    def test_chunked_body_decoded(self):
+        """Chunked transfer-encoded bodies are decoded, not read as empty."""
+        import socket
+        server, captured = make_server()
+        try:
+            payload = b'{"event": "chunked-ping"}'
+            chunk = b"%X\r\n%s\r\n" % (len(payload), payload)
+            raw = (b"POST /hook HTTP/1.1\r\n"
+                   b"Host: 127.0.0.1\r\n"
+                   b"Transfer-Encoding: chunked\r\n"
+                   b"Content-Type: application/json\r\n"
+                   b"Connection: close\r\n"
+                   b"\r\n" + chunk + b"0\r\n\r\n")
+            with socket.create_connection(("127.0.0.1", server.bound_port),
+                                          timeout=5) as sock:
+                sock.sendall(raw)
+                resp = b""
+                while True:
+                    part = sock.recv(4096)
+                    if not part:
+                        break
+                    resp += part
+            self.assertIn(b"200", resp.split(b"\r\n", 1)[0])
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(json.loads(captured[0]["body"]),
+                             {"event": "chunked-ping"})
+        finally:
+            server.stop()
+
+    def test_head_returns_headers_without_body(self):
+        """HEAD: 200 with headers, empty body, still recorded."""
+        server, captured = make_server()
+        try:
+            status, ack = request(server.bound_port, method="HEAD",
+                                  path="/hook")
+            self.assertEqual(status, 200)
+            self.assertEqual(ack, b"")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["method"], "HEAD")
+        finally:
+            server.stop()
+
+    def test_options_returns_204_with_allow(self):
+        """OPTIONS: 204 with an Allow header, no body."""
+        import http.client
+        server, captured = make_server()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", server.bound_port,
+                                              timeout=5)
+            conn.request("OPTIONS", "/hook")
+            resp = conn.getresponse()
+            allow = resp.getheader("Allow")
+            body = resp.read()
+            conn.close()
+            self.assertEqual(resp.status, 204)
+            self.assertIsNotNone(allow)
+            self.assertIn("POST", allow)
+            self.assertEqual(body, b"")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["method"], "OPTIONS")
+        finally:
+            server.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
